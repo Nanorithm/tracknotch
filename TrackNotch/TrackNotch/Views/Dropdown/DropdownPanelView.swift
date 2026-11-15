@@ -233,6 +233,20 @@ struct DropdownProviderPill: View {
 
     private let pillHeight: CGFloat = 52
 
+    /// Critically damped spring (no overshoot). Unlike a fixed-duration ease, a
+    /// live update mid-fill retargets from the current width and keeps its velocity.
+    private static let fillSpring = Animation.spring(response: 0.45, dampingFraction: 1.0)
+
+    /// macOS dark-appearance system green / orange / red, switched at fixed
+    /// thresholds rather than blended.
+    private var usageTint: Color {
+        switch displayPct {
+        case ..<50: return Color(hex: "30d158")
+        case ..<80: return Color(hex: "ff9f0a")
+        default:    return Color(hex: "ff453a")
+        }
+    }
+
     /// The percentage this pill renders — primary or secondary depending on mode.
     private var sourcePercentage: Double {
         secondary ? (usage.secondaryPercentage ?? 0) : usage.percentage
@@ -250,60 +264,21 @@ struct DropdownProviderPill: View {
             // one with secondary=true), so each pill stays uncluttered.
             ZStack(alignment: .leading) {
                     if !isAPIToken {
-                        // Subscription/local: liquid fill progress bar
-                        let hasProgress = displayPct > 0
-                        // Clamp fill to the pill's own width so percentages
-                        // above 100% (e.g. rate-limit hit at 123%) don't
-                        // overflow past the capsule into the icon area.
-                        // The percentage text still shows the true value.
-                        let fillWidth = hasProgress ? min(w, w * CGFloat(displayPct / 100)) : 0
-                        if hasProgress {
-                            LiquidFill(percentage: displayPct, height: pillHeight)
-                                .frame(width: fillWidth, height: pillHeight)
-                        }
+                        // Subscription/local: flat system-tinted fill.
+                        // Clamped to the pill width so >100% (e.g. 123% after a
+                        // rate-limit hit) can't overflow; the text keeps the true value.
+                        Rectangle()
+                            .fill(usageTint.opacity(0.85))
+                            .frame(width: min(w, w * CGFloat(max(displayPct, 0) / 100)), height: pillHeight)
                     }
 
-                    // Left: stats text
-                    // API token has no fill so a single white layer suffices.
-                    // Subscription/local renders two identical layers masked to each
-                    // side of the fill boundary so text is charcoal on fill, white on background.
-                    let fillWidth = isAPIToken ? 0 : min(w, w * CGFloat(displayPct / 100))
-                    if isAPIToken {
-                        statsText(onFill: false)
-                            .padding(.leading, 11)
-                            .frame(maxWidth: w - 34, alignment: .leading)
-                            .opacity(contentOpacity)
-                    } else {
-                        // maskOffset: fill boundary relative to the text's own coordinate space
-                        // (fillWidth is from pill left edge; text is inset by 11pt leading pad)
-                        let leadingPad: CGFloat = 11
-                        let maskOffset = max(0, fillWidth - leadingPad)
-                        ZStack(alignment: .leading) {
-                            // White layer — visible right of fill boundary (background region)
-                            statsText(onFill: false)
-                                .mask(alignment: .leading) {
-                                    HStack(spacing: 0) {
-                                        Rectangle()
-                                            .frame(width: maskOffset)
-                                            .opacity(0)
-                                        Rectangle()
-                                    }
-                                }
-                            // Charcoal layer — visible left of fill boundary (fill region)
-                            statsText(onFill: true)
-                                .mask(alignment: .leading) {
-                                    HStack(spacing: 0) {
-                                        Rectangle()
-                                            .frame(width: maskOffset)
-                                        Rectangle()
-                                            .opacity(0)
-                                    }
-                                }
-                        }
-                        .padding(.leading, leadingPad)
+                    // Left: stats text — white reads on both the fill and the track,
+                    // so a single layer works without masking at the fill boundary.
+                    statsText
+                        .shadow(color: .black.opacity(isAPIToken ? 0 : 0.25), radius: 1, y: 0.5)
+                        .padding(.leading, 11)
                         .frame(maxWidth: w - 34, alignment: .leading)
                         .opacity(contentOpacity)
-                    }
 
                     // Right: app icon + error dot
                     HStack(spacing: 0) {
@@ -329,6 +304,7 @@ struct DropdownProviderPill: View {
                 .frame(width: w, height: pillHeight)
                 .background(Capsule().fill(Color.white.opacity(0.08)))
                 .clipShape(Capsule())
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
         }
         .frame(height: pillHeight)
         .onAppear {
@@ -348,7 +324,7 @@ struct DropdownProviderPill: View {
 
             // Fill animates from 0 to the relevant usage (primary or secondary)
             DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.05) {
-                withAnimation(.easeOut(duration: 0.7)) {
+                withAnimation(Self.fillSpring) {
                     animatedPct = sourcePercentage
                 }
             }
@@ -360,13 +336,13 @@ struct DropdownProviderPill: View {
         }
         .onChange(of: usage.percentage) { newValue in
             // Live updates while dropdown is open
-            withAnimation(.easeOut(duration: 0.5)) {
+            withAnimation(Self.fillSpring) {
                 animatedPct = secondary ? (usage.secondaryPercentage ?? 0) : newValue
             }
         }
         .onChange(of: usage.secondaryPercentage) { newValue in
             guard secondary else { return }
-            withAnimation(.easeOut(duration: 0.5)) {
+            withAnimation(Self.fillSpring) {
                 animatedPct = newValue ?? 0
             }
         }
@@ -397,12 +373,11 @@ struct DropdownProviderPill: View {
 
     // MARK: - Stats text helper
 
-    /// Renders the stats VStack with colors appropriate for its background.
-    /// `onFill: true` → charcoal (sits on liquid fill); `false` → white (sits on dark track).
+    /// Renders the stats VStack in white; it sits on both the fill and the dark track.
     @ViewBuilder
-    private func statsText(onFill: Bool) -> some View {
-        let primary:   Color = onFill ? Color(hex: "252728")         : .white.opacity(displayPct > 0 ? 1 : 0.45)
-        let secondary: Color = onFill ? Color(hex: "252728").opacity(0.7) : .white.opacity(displayPct > 0 ? 0.75 : 0.3)
+    private var statsText: some View {
+        let primary:   Color = .white.opacity(displayPct > 0 ? 1 : 0.45)
+        let secondary: Color = .white.opacity(displayPct > 0 ? 0.75 : 0.3)
 
         VStack(alignment: .leading, spacing: 2) {
             if isAPIToken {
@@ -487,130 +462,3 @@ struct DropdownProviderPill: View {
         return "\(n)"
     }
 }
-
-// MARK: - Liquid fill
-
-/// Two-layer liquid effect:
-/// - Back layer: the dominant color for the current percentage range
-/// - Front layer: the incoming next color, clipped to a blob whose right edge
-///   has a slow sine-wave oscillation — looks like liquid pouring in from the front.
-///   The blob width grows as the percentage moves deeper into each transition zone.
-private struct LiquidFill: View {
-    let percentage: Double   // 0–100, already animated by caller
-    let height: CGFloat
-
-    // 64×64 noise tile baked once at startup — tiled across the pill at render time
-    static let noiseImage: CGImage? = {
-        let side = 64
-        let count = side * side
-        var pixels = [UInt8](repeating: 0, count: count * 4)
-        var seed: UInt32 = 0xA3B1_C2D4
-        for i in 0..<count {
-            seed = seed &* 1_664_525 &+ 1_013_904_223
-            let v = UInt8(seed >> 24)          // 0–255 random luminance
-            let alpha = UInt8(30 + (v % 40))   // 30–69 alpha (12–27% opacity)
-            let base = i * 4
-            pixels[base]     = v
-            pixels[base + 1] = v
-            pixels[base + 2] = v
-            pixels[base + 3] = alpha
-        }
-        let data = Data(pixels)
-        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
-        return CGImage(
-            width: side, height: side,
-            bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: side * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-            provider: provider,
-            decode: nil, shouldInterpolate: false,
-            intent: .defaultIntent
-        )
-    }()
-
-    // Which transition zone are we in, and how far through it (0–1)?
-    private var zone: (back: Color, front: Color, progress: Double) {
-        let green  = Color(hex: "9cc900")
-        let orange = Color(hex: "ff7c1e")
-        let red    = Color(hex: "f53535")
-
-        switch percentage {
-        case 0..<50:
-            // Pure green — no incoming color yet
-            return (green, green, 0)
-        case 50..<75:
-            // Orange bleeding in, green receding — transition over 25 points
-            let t = (percentage - 50) / 25
-            return (green, orange, t)
-        case 75...:
-            // Red bleeding in, orange receding — transition over 25 points
-            let t = min((percentage - 75) / 25, 1.0)
-            return (orange, red, t)
-        default:
-            return (green, green, 0)
-        }
-    }
-
-    /// Wave animation only needed when between two color zones (progress 0–1).
-    private var needsAnimation: Bool {
-        let z = zone
-        return z.progress > 0 && z.progress < 1
-    }
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: needsAnimation ? 1.0 / 30.0 : 1.0)) { tl in
-            let phase = tl.date.timeIntervalSinceReferenceDate
-            let z = zone
-
-            ZStack {
-                // ── Layer 1: liquid color canvas, rasterized then blurred ──
-                // drawingGroup() flattens into a Metal texture first so .blur()
-                // only samples pixels within the layer — no black bleed from outside.
-                Canvas { ctx, size in
-                    ctx.fill(
-                        Path(CGRect(origin: .zero, size: size)),
-                        with: .color(z.front)
-                    )
-
-                    guard z.progress > 0 && z.progress < 1 else { return }
-
-                    let blobWidth = size.width * CGFloat(1.0 - z.progress)
-                    let amplitude: CGFloat = height * 0.22
-                    let frequency: Double  = 1.4
-                    let wavePhase          = phase * 2.2
-
-                    var path = Path()
-                    path.move(to: CGPoint(x: 0, y: 0))
-                    let steps = Int(size.height * 2)
-                    for i in 0...steps {
-                        let y = size.height * CGFloat(i) / CGFloat(steps)
-                        let t = Double(i) / Double(steps)
-                        let angle: Double = t * .pi * 2 * frequency
-                        let primary: Double = sin(angle + wavePhase) * 0.65
-                        let secondary: Double = sin(angle * 1.6 + wavePhase * 1.3) * 0.35
-                        let wave = amplitude * CGFloat(primary + secondary)
-                        path.addLine(to: CGPoint(x: blobWidth + wave, y: y))
-                    }
-                    path.addLine(to: CGPoint(x: 0, y: size.height))
-                    path.closeSubpath()
-                    ctx.fill(path, with: .color(z.back))
-                }
-                .drawingGroup()   // rasterize into Metal texture — blur samples this, not scene behind
-                .blur(radius: 6.4)
-
-                // ── Layer 2: static noise texture overlay ──
-                if let noise = LiquidFill.noiseImage {
-                    Image(noise, scale: 1, label: Text(""))
-                        .resizable(resizingMode: .tile)
-                        .blendMode(.overlay)
-                        .opacity(0.28)
-                }
-            }
-            // Clip the entire ZStack (blur + noise) so blur bleed can't escape
-            // past the capsule edge. Placed on the ZStack rather than the Canvas
-            // layer so the noise overlay also composites within the clipped bounds.
-            .clipped()
-        }
-    }
-}
-
